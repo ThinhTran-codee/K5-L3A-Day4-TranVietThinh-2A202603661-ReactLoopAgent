@@ -73,6 +73,22 @@ def run_agent(question, provider, tools, max_steps=6):
                 "finish": finish
             })
 
+            if finish == 'length':
+                trace.append({
+                    "event": "error",
+                    "step": step,
+                    "error": "MODEL_OUTPUT_TRUNCATED",
+                    "message": "Model output was truncated."
+                })
+
+                return {
+                    "status": "error",
+                    "answer": "",
+                    "trace": trace,
+                    "usage": usage,
+                    "error": "Model output was truncated."
+                }
+
             # 2. Xử lý tất cả tool calls
             if calls:
                 for call in calls:
@@ -89,16 +105,24 @@ def run_agent(question, provider, tools, max_steps=6):
                                 "Tool arguments must be a JSON object"
                             )
 
-                        result = tools.execute(name, args)
-
                     except (json.JSONDecodeError, ValueError) as exc:
                         args = arguments
 
                         result = {
                             "ok": False,
                             "error": "INVALID_ARGUMENTS",
-                            "message": f"Invalid tool arguments: {str(exc)}"
+                            "message": str(exc)
                         }
+                    else:
+                        try:
+                            result = tools.execute(name, args)
+
+                        except Exception as exc:
+                            result = {
+                                "ok": False,
+                                "error": "TOOL_ERROR",
+                                "message": str(exc)
+                            }
 
                     # 3. Thu thập URL từ get_incident_details thành công.
                     if (
@@ -178,6 +202,12 @@ def run_agent(question, provider, tools, max_steps=6):
         }
 
     except Exception as exc:
+        trace.append({
+            "event": "error",
+            "error": "PROVIDER_ERROR", 
+            "message": str(exc)
+        })
+
         return {
             "status": "error",
             "answer": answer,
