@@ -1,6 +1,7 @@
 """Bốn provider cùng một interface. Không chứa agent loop."""
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -9,19 +10,71 @@ CONFIG = {
     'gemini': ('GEMINI_API_KEY', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'),
     'openrouter': ('OPENROUTER_API_KEY', 'https://openrouter.ai/api/v1/chat/completions'),
     'anthropic': ('ANTHROPIC_API_KEY', 'https://api.anthropic.com/v1/messages'),
+    'groq': ('GROQ_API_KEY', 'https://api.groq.com/openai/v1/chat/completions'),
 }
 
+import requests
 
-def post_json(url, headers, payload):
-    req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        # Do not print response bodies: they may contain account or request data.
-        raise RuntimeError(f'Provider trả HTTP {exc.code}; kiểm tra model, key và quota.') from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f'Không kết nối được provider: {exc.reason}') from exc
+def post_json(url, headers, payload, max_retries=6):
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                url,
+                headers={
+                    'Content-Type': 'application/json',
+                    **headers
+                },
+                json=payload,
+                timeout=120
+            )
+
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                retry_after = response.headers.get("retry-after")
+                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else min(2 * (2 ** attempt), 30)
+                time.sleep(wait_time)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            if response is not None and response.status_code in (429, 500, 502, 503, 504) and attempt < max_retries - 1:
+                retry_after = response.headers.get("retry-after") if response.headers else None
+                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else min(2 * (2 ** attempt), 30)
+                time.sleep(wait_time)
+                continue
+
+            try:
+                detail = response.json() if response is not None else str(exc)
+            except ValueError:
+                detail = response.text[:1000] if response is not None else str(exc)
+
+            headers_info = {
+                key: value
+                for key, value in (response.headers.items() if response is not None and response.headers else {})
+                if key.lower().startswith("x-ratelimit")
+                or key.lower() == "retry-after"
+            }
+
+            status_code = response.status_code if response is not None else 'unknown'
+            raise RuntimeError(
+                f'Provider trả HTTP {status_code}: {detail}'
+                f'Headers: {headers_info}'
+            ) from exc
+
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_retries - 1:
+                time.sleep(min(2 * (2 ** attempt), 30))
+                continue
+            raise RuntimeError(
+                f'Không kết nối được provider: {exc}'
+            ) from exc
+
+        except ValueError as exc:
+            raise RuntimeError(
+                'Provider trả về JSON không hợp lệ.'
+            ) from exc
 
 
 class Provider:
@@ -48,10 +101,50 @@ class Provider:
         if schemas:
             payload['tools'] = schemas
         data = post_json(self.url, {'Authorization': f'Bearer {self.key}'}, payload)
-        choice = data['choices'][0]
-        message = choice['message']
-        calls = [{'id': c['id'], 'name': c['function']['name'], 'arguments': c['function']['arguments']} for c in message.get('tool_calls', [])]
-        return {'message': message, 'calls': calls, 'finish': choice.get('finish_reason'), 'usage': data.get('usage', {})}
+        if not isinstance(data, dict):
+            raise RuntimeError("Provider trả về response không hợp lệ.")
+        if 'error' in data:
+            error = data['error']
+            if isinstance(error, dict):
+                error_message = error.get('message', 'Unknown provider error')
+            else:
+                error_message = str(error)
+            raise RuntimeError(f"Provider error: {error_message}")
+
+        choices = data.get('choices')
+
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(
+               f"Provider response thiếu choices. Response keys: {list(data.keys())}"
+            )
+        
+        choice = choices[0]
+        message = choice.get('message')
+
+        if not isinstance(message, dict):
+            raise RuntimeError("Provider response thiếu message hợp lệ.")
+
+        calls = [
+            {
+                'id': c['id'],
+                'name': c['function']['name'],
+                'arguments': c['function']['arguments']
+            }
+            for c in message.get('tool_calls', [])
+        ]
+
+        return {
+            'message': message,
+            'calls': calls,
+            'finish': choice.get('finish_reason'),
+            'usage': data.get('usage', {})
+        }
+
+        # data = post_json(self.url, {'Authorization': f'Bearer {self.key}'}, payload)
+        # choice = data['choices'][0]
+        # message = choice['message']
+        # calls = [{'id': c['id'], 'name': c['function']['name'], 'arguments': c['function']['arguments']} for c in message.get('tool_calls', [])]
+        # return {'message': message, 'calls': calls, 'finish': choice.get('finish_reason'), 'usage': data.get('usage', {})}
 
     def _anthropic(self, messages, schemas):
         system = '\n'.join(m['content'] for m in messages if m['role'] == 'system')

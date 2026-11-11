@@ -18,7 +18,7 @@ Nếu tool trả về lỗi, hãy đọc lỗi và điều chỉnh trong giới 
 def extract_urls(data):
     """Trích xuất URL từ kết quả tool."""
     text = json.dumps(data, ensure_ascii=False, default=str)
-    urls = re.findall(r"https?://[^\s'\"<>]+", text)
+    urls = re.findall(r"https?://[^\s'\"<>()\[\]]+", text)
 
     return {
         url.rstrip(".,;:!?)\\]}")
@@ -172,6 +172,16 @@ def run_agent(question, provider, tools, max_steps=6):
                         "step": step,
                         "required_sources": sorted(required_sources),
                         "answer": answer
+                    })
+
+                    sourrce_text = "\n\nNguồn:\n" + "\n".join(sorted(required_sources))
+
+                    answer = answer.rstrip() + sourrce_text
+
+                    trace.append({
+                        "event": "source_appended",
+                        "step": step,
+                        "sources": sorted(required_sources),
                     })
 
                     # Nếu còn lượt gọi model, yêu cầu bổ sung nguồn.
